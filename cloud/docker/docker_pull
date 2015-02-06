@@ -1,0 +1,257 @@
+#!/usr/bin/python
+# This file is part of Ansible
+#
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+
+DOCUMENTATION = '''
+---
+module: docker_pull
+short_description: pull docker images
+description:
+    - Retrieve Docker images from remote sources.
+version_added: ""
+options:
+  image:
+    description:
+      - The image to retrieve (including `repo` and `tag`)
+    required: true
+    default: null
+    aliases: []
+  registry_url:
+    description:
+      - A custom registry endpoint in the format [http|https]://[url]/[version_spec]
+    required: false
+    default: "https://index.docker.io/v1/"
+    aliases: ['registry']
+  docker_url:
+    description:
+      - An alternative URL to connect to the Docker daemon
+    required: false
+    default: unix:///var/run/docker.sock
+    aliases: []
+  username:
+    description:
+      - The registry username for the registry endpoint
+    required: false
+    default: null
+    aliases: ['user']
+  password:
+    description:
+      - The password for the registry endpoint
+    required: false
+    default: null
+    aliases: ['pass','passwd']
+  email:
+    description:
+      - The email associated with the login account
+    required: false
+    default: null
+    aliases: ['email_address']
+  all_tags:
+    description:
+      - Retrieve all tags associated with the image
+    required: false
+    default: false
+    aliases: ['all']
+'''
+
+EXAMPLES = '''
+# Basic Docker Pull from public registry (`latest` tag)
+- docker_pull:
+    image: busybox
+
+# Pull a specific tag for a container
+- docker_pull:
+    image: busybox
+    tag: buildroot-2014.02
+
+# Pull all tags for an image
+- docker_pull:
+    image: busybox
+    all_tags: true
+
+
+# Pull from a private repository on Docker Hub using Authentication
+- docker_pull:
+    image: mycompany/myimage:1.0
+    username: myuser
+    password: mypassword
+    email: myuser@mycompany.com
+
+# Pull from a private registry
+- docker_pull:
+    image: myimage:2.0
+    registry: https://docker.mycompany.com/v1/
+    username: myuser
+    password: mypassword
+    email: myuser@mycompany.com
+'''
+
+import re
+
+from urlparse import urlparse
+
+HAS_DOCKER_PY = True
+try:
+    import docker
+except ImportError:
+    HAS_DOCKER_PY = False
+
+REPO_REGEX = re.compile(
+    r'^((?P<repo>.+)/|)(?P<image>[a-zA-Z0-9_]+)(:(?P<tag>[a-zA-Z0-9_-]+)|)$'
+)
+
+
+class DockerManager:
+    def __init__(self, module):
+        self.module = module
+        self.docker_url = urlparse(module.params.get('docker_url'))
+        self.image = module.params.get('image')
+        self.all_tags = module.params.get('all_tags')
+        self.registry_url = module.params.get('registry_url')
+        self.username = module.params.get('username')
+        self.password = module.params.get('password')
+        self.email = module.params.get('email')
+
+        self.client = docker.Client(base_url=self.docker_url.geturl())
+        if self.client is None:
+            module.fail_json(msg="Failed to instantiate Docker client. This "
+                                 "could mean that Docker isn't running.")
+
+    def get_image_parts(self):
+        return DOCKER_REPO_REGEX(self.image).group('repo', 'image', 'tag')
+
+    def do_pull_all_tags(self):
+        repo, image, tag = self.get_image_parts()
+        # Sanity check that we haven't specified a tag as part of `image`
+        if tag:
+            self.module.fail_json(
+                msg="You cannot use `all_tags` when specifying a tag as part "
+                    "of the `image` argument."
+            )
+
+        # Find all available tags under `image`
+
+    def parse_result(self, result):
+        error = False
+        msg = "Success"
+        changed = False
+
+        json_list = list(result)
+
+        # The success/fail message is usually in the last item of the
+        # list, so we get it here. It will contain 'error' in keys
+        # if it failed and 'status' if it succeeded or took no action
+        status_line = json.loads(json_list.pop(-1))
+
+        if 'error' in status_line.keys():
+            self.error = True
+            msg = status_line['error']
+        else:
+            msg = status_line['status']
+
+        # The remaining list items should be status updates on each
+        # layer. In here there is a 'progressDetail' tag that should
+        # be empty if no change was made, so we assume that any
+        # dict('progressDetail').keys() should be > 0 if a change was
+        # made
+        #
+        # NOTE: This is not fool-proof, but due to the current docker-py
+        #       implementation, it is the simplest way I could see to
+        #       check for changes
+        for update in json_list:
+            if 'current' in json.loads(update)['progressDetail'].keys():
+                changed = True
+                break
+
+        return error, msg, changed
+
+    def do_pull_tag(self):
+        repo, image, tag = self.get_image_parts()
+        pull_url
+        if repo:
+            pull_url += repo + '/'
+        pull_url += image
+        if not tag:
+            tag = 'latest'
+        try:
+            # Pull with stream=True will return a generator. We cast it
+            # to a list and process the results bellow
+            result = self.client.pull(pull_url, tag=tag, stream=True)
+        except:
+            self.module.fail_json(msg="An unknown error occurred while pulling"
+                                      " the docker image")
+
+        error, msg, changed = self.parse_result(result)
+
+        if error:
+            self.module.fail_json(
+                msg="Image failed to pull",
+                error=msg,
+                changed=changed
+            )
+        else:
+            self.module.exit_json(
+                msg=msg,
+                changed=changed,
+                success=True
+            )
+
+    def run(self):
+        # Do we need to authenticate?
+        if self.username:
+            try:
+                self.client.login(
+                    self.username,
+                    password=self.password,
+                    email=self.email,
+                    registry=self.registry_url
+                )
+            except:
+                self.module.fail_json(
+                    msg="Failed to login to the remote registry. "
+                        "Check your username/password."
+                )
+
+        # Do we want to pull one or all tags?
+        if self.all_tags:
+            self.do_pull_all_tags()
+        else:
+            self.do_pull_tag()
+
+
+def main():
+    argument_spec = dict(
+        image=dict(),
+        username=dict(default=None, aliases=['user']),
+        password=dict(default=None, aliases=['pass', 'passwd']),
+        email=dict(default=None),
+        docker_url=dict(default='unix://var/run/docker.sock'),
+        registry_url=dict(default='https://index.docker.io/v1/')
+    )
+
+    module = AnsibleModule(argument_spec=argument_spec)
+
+    if not HAS_DOCKER_PY:
+        module.fail_json(
+            msg='The Docker python client is required for this module'
+        )
+
+    manager = DockerManager(module)
+    manager.pull_image()
+
+
+from ansible.module_utils.basic import *
+
+main()
