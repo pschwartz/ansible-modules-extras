@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python2
 # This file is part of Ansible
 #
 # Ansible is free software: you can redistribute it and/or modify
@@ -130,18 +130,7 @@ class DockerManager:
                                  "could mean that Docker isn't running.")
 
     def get_image_parts(self):
-        return DOCKER_REPO_REGEX(self.image).group('repo', 'image', 'tag')
-
-    def do_pull_all_tags(self):
-        repo, image, tag = self.get_image_parts()
-        # Sanity check that we haven't specified a tag as part of `image`
-        if tag:
-            self.module.fail_json(
-                msg="You cannot use `all_tags` when specifying a tag as part "
-                    "of the `image` argument."
-            )
-
-        # Find all available tags under `image`
+        return REPO_REGEX.match(self.image).group('repo', 'image', 'tag')
 
     def parse_result(self, result):
         error = False
@@ -179,15 +168,24 @@ class DockerManager:
 
     def do_pull_tag(self):
         repo, image, tag = self.get_image_parts()
-        pull_url
+        pull_url = ''
         if repo:
             pull_url += repo + '/'
         pull_url += image
-        if not tag:
+
+        # What tags do they want (defaults to 'latest' unless specified)
+        # Errors if they request a tag AND all_tags=True
+        if self.all_tags and tag:
+            self.module.fail_json(msg="Cannot specify all_tags AND an image"
+                                      " containing a tag")
+        elif self.all_tags:
+            tag = None
+        elif not tag:
             tag = 'latest'
+
         try:
             # Pull with stream=True will return a generator. We cast it
-            # to a list and process the results bellow
+            # to a list and process the results later
             result = self.client.pull(pull_url, tag=tag, stream=True)
         except:
             self.module.fail_json(msg="An unknown error occurred while pulling"
@@ -224,21 +222,18 @@ class DockerManager:
                         "Check your username/password."
                 )
 
-        # Do we want to pull one or all tags?
-        if self.all_tags:
-            self.do_pull_all_tags()
-        else:
-            self.do_pull_tag()
+        self.do_pull_tag()
 
 
 def main():
     argument_spec = dict(
-        image=dict(),
+        image=dict(type='str'),
         username=dict(default=None, aliases=['user']),
         password=dict(default=None, aliases=['pass', 'passwd']),
         email=dict(default=None),
         docker_url=dict(default='unix://var/run/docker.sock'),
-        registry_url=dict(default='https://index.docker.io/v1/')
+        registry_url=dict(default='https://index.docker.io/v1/'),
+        all_tags=dict(default=False, type='bool')
     )
 
     module = AnsibleModule(argument_spec=argument_spec)
@@ -249,7 +244,7 @@ def main():
         )
 
     manager = DockerManager(module)
-    manager.pull_image()
+    manager.run()
 
 
 from ansible.module_utils.basic import *
