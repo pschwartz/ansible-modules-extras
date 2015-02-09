@@ -1,0 +1,186 @@
+#!/usr/bin/python2
+# This file is part of Ansible
+#
+# Ansible is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Ansible is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+
+DOCUMENTATION = '''
+---
+module: docker_exec
+short_description: execute a command inside the given container
+description:
+    - Execute a command inside an existing docker container non-interactively.
+version_added: ""
+options:
+  container:
+    description:
+      - The container to run the command in (can be long or short id, or friendly name)
+    required: true
+    default: null
+    aliases: ['name','id','container_name']
+  command:
+    description:
+      - The command you wish to run
+    required: true
+    default: null
+    aliases: ['cmd']
+  tty:
+    description:
+      - Should we attach a TTY to the execution task? (Some commands won't work without a TTY)
+    required: false
+    default: false
+    aliases: []
+  docker_url:
+    description:
+      - The url to talk to the Docker daemon on (local socket/url or remote)
+    required: false
+    default: /var/run/docker.sock
+    aliases: []
+'''
+
+EXAMPLES = '''
+# echo some information about a container
+- docker_exec:
+    container: jovial_ardinghelli
+    command: cat /etc/hostname /etc/hosts /proc/loadavg
+
+
+# Run a command and, based on the output, take another action
+- docker_exec:
+    container: my-webserver
+    command: /opt/check_webserver_health.sh
+  ignore_errors: True
+  register: health_check
+
+- command: docker rm -f my-webserver
+  when: health_check.rc != 0
+'''
+
+import six
+from urlparse import urlparse
+
+HAS_DOCKER_PY = True
+try:
+    import docker
+except ImportError:
+    HAS_DOCKER_PY = False
+
+
+class DockerManager:
+    def __init__(self, module):
+        self.module = module
+        self.docker_url = urlparse(module.params.get('docker_url'))
+        self.container = module.params.get('container')
+        self.command = module.params.get('command')
+        self.tty = module.params.get('tty')
+
+        self.client = docker.Client(base_url=self.docker_url.geturl())
+        if self.client is None:
+            module.fail_json(msg="Failed to instantiate Docker client. This "
+                                 "could mean that Docker isn't running.")
+
+    def execute_wrapper(self, command_id, response):
+        '''
+        This is a work-around to the 0.7.2 docker-py version not implementing
+        return-codes for execute calls.
+
+        Taken pretty much verbatim from @athoune's Github comment here:
+
+            https://github.com/docker/docker-py/issues/444
+        '''
+        pass
+
+    def do_execute_command(self):
+        '''
+        Execute the command in the specified container and return
+        the exit code and stdout/stderr
+        '''
+        # Currently docker-py doesn't support return the exit code
+        # so we're falling back directly to the API endpoints to gather
+        # this information
+        if isinstance(self.command, six.string_types):
+            self.command = shlex.split(str(self.command))
+        data = {
+            'Container': self.container,
+            'Tty': False,
+            'AttachStdin': False,
+            'AttachStdout': True,
+            'AttachStderr': True,
+            'Detach': False,
+            'Cmd': self.command,
+            'Tty': False
+        }
+        url = self.client._url('/containers/{0}/exec'.format(self.container))
+        response = self.client._post_json(url, data)
+        exec_id = response.json()['Id']
+
+        url = self.client._url('/exec/{0}/start'.format(exec_id))
+        response = self.client._post_json(
+            url,
+            data=data
+        )
+        self.client._raise_for_status(response)
+
+        if six.PY3:
+            response = bytes().join(
+                [x for x in self.client._multiplexed_buffer_helper(response)]
+            )
+        else:
+            response = str().join(
+                [x for x in self.client._multiplexed_buffer_helper(response)]
+            )
+
+        rc = self.client._get(
+            self.client._url('/exec/%s/json' % exec_id)
+        ).json()['ExitCode']
+        self.module.exit_json(output=response, rc=rc, changed=True)
+
+    def run(self):
+        self.do_execute_command()
+
+
+def main():
+    argument_spec = dict(
+        container=dict(
+            type='str',
+            required=True,
+            aliases=['id', 'container_name']
+        ),
+        command=dict(
+            type='str',
+            required=True,
+            aliases=['cmd']
+        ),
+        docker_url=dict(
+            default='unix://var/run/docker.sock'
+        ),
+        tty=dict(
+            default=False,
+            type='bool'
+        )
+    )
+
+    module = AnsibleModule(argument_spec=argument_spec)
+
+    if not HAS_DOCKER_PY:
+        module.fail_json(
+            msg='The Docker python client is required for this module'
+        )
+
+    manager = DockerManager(module)
+    manager.run()
+
+
+from ansible.module_utils.basic import *
+
+main()
