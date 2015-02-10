@@ -109,7 +109,7 @@ except ImportError:
     HAS_DOCKER_PY = False
 
 REPO_REGEX = re.compile(
-    r'^((?P<repo>.+)/|)(?P<image>[a-zA-Z0-9_]+)(:(?P<tag>[a-zA-Z0-9_-]+)|)$'
+    r'^((?P<repo>.+)/|)(?P<image>[a-zA-Z0-9_\-]+)(:(?P<tag>.+)|)$'
 )
 
 
@@ -129,20 +129,29 @@ class DockerManager:
             module.fail_json(msg="Failed to instantiate Docker client. This "
                                  "could mean that Docker isn't running.")
 
+    def check_current_image(self):
+        repo, image, tag = self.get_image_parts()
+        for image in self.client.images():
+            if self.image in image['RepoTags']:
+                self.current_image_id = image['Id']
+
     def get_image_parts(self):
-        return REPO_REGEX.match(self.image).group('repo', 'image', 'tag')
+        try:
+            return REPO_REGEX.match(self.image).group('repo', 'image', 'tag')
+        except Exception as e:
+            self.module.fail_json(msg=e.message, image=self.image)
 
     def parse_result(self, result):
         error = False
         msg = "Success"
         changed = False
 
-        json_list = list(result)
+        output = list(result)
 
         # The success/fail message is usually in the last item of the
         # list, so we get it here. It will contain 'error' in keys
         # if it failed and 'status' if it succeeded or took no action
-        status_line = json.loads(json_list.pop(-1))
+        status_line = json.loads(output.pop(-1))
 
         if 'error' in status_line.keys():
             self.error = True
@@ -150,21 +159,16 @@ class DockerManager:
         else:
             msg = status_line['status']
 
-        # The remaining list items should be status updates on each
-        # layer. In here there is a 'progressDetail' tag that should
-        # be empty if no change was made, so we assume that any
-        # dict('progressDetail').keys() should be > 0 if a change was
-        # made
-        #
-        # NOTE: This is not fool-proof, but due to the current docker-py
-        #       implementation, it is the simplest way I could see to
-        #       check for changes
-        for update in json_list:
-            if 'current' in json.loads(update)['progressDetail'].keys():
-                changed = True
-                break
+        new_image_id = None
+        repo, image, tag = self.get_image_parts()
+        for image in self.client.images():
+            if self.image in image['RepoTags']:
+                new_image_id = image['Id']
 
-        return error, msg, changed
+        if new_image_id != self.current_image_id:
+            changed = True
+
+        return error, msg, changed, output
 
     def do_pull_tag(self):
         repo, image, tag = self.get_image_parts()
@@ -191,20 +195,7 @@ class DockerManager:
             self.module.fail_json(msg="An unknown error occurred while pulling"
                                       " the docker image")
 
-        error, msg, changed = self.parse_result(result)
-
-        if error:
-            self.module.fail_json(
-                msg="Image failed to pull",
-                error=msg,
-                changed=changed
-            )
-        else:
-            self.module.exit_json(
-                msg=msg,
-                changed=changed,
-                success=True
-            )
+        return result
 
     def run(self):
         # Do we need to authenticate?
@@ -222,7 +213,27 @@ class DockerManager:
                         "Check your username/password."
                 )
 
-        self.do_pull_tag()
+        # Check and Note any existing image to compare to
+        self.check_current_image()
+
+        result = self.do_pull_tag()
+
+        error, msg, changed, output = self.parse_result(result)
+
+        if error:
+            self.module.fail_json(
+                msg="Image failed to pull",
+                error=msg,
+                changed=changed,
+                output=output
+            )
+        else:
+            self.module.exit_json(
+                msg=msg,
+                changed=changed,
+                success=True,
+                output=output
+            )
 
 
 def main():
