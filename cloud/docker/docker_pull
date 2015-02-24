@@ -131,13 +131,25 @@ class DockerManager:
 
     def check_current_image(self):
         repo, image, tag = self.get_image_parts()
-        for image in self.client.images():
-            if self.image in image['RepoTags']:
-                self.current_image_id = image['Id']
+        
+        image = "{image}:{tag}".format(image=image, tag=tag)
+        image_id = None
+        
+        for _image in self.client.images():
+            if image in _image['RepoTags']:
+                image_id = _image['Id']
+
+        self.current_image_id = image_id
 
     def get_image_parts(self):
         try:
-            return REPO_REGEX.match(self.image).group('repo', 'image', 'tag')
+            repo, image, tag = REPO_REGEX.match(self.image).group('repo',
+                                                                  'image',
+                                                                  'tag')
+            if not tag:
+                tag = 'latest'
+                
+            return (repo, image, tag)
         except Exception as e:
             self.module.fail_json(msg=e.message, image=self.image)
 
